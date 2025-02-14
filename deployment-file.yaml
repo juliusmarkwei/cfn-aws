@@ -1,1 +1,3 @@
-template-file-path: ./iam-template.yaml
+template-file-path: iam-template.yaml
+parameters: {}
+tags: {}
