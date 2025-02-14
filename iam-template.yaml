@@ -178,6 +178,14 @@ Resources:
                                 - "logs:CreateLogStream"
                                 - "logs:PutLogEvents"
                             Resource: "*"
+                          - Effect: Allow
+                            Action:
+                                - "lambda:GetFunction"
+                                - "lambda:ListFunctions"
+                                - "lambda:DeleteFunction"
+                                - "lambda:UpdateFunctionConfiguration"
+                                - "lambda:UpdateFunctionCode"
+                            Resource: "*"
 
 Outputs:
     IAMUserLoggingLambdaARN:
