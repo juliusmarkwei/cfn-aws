@@ -1,194 +1,206 @@
-AWSTemplateFormatVersion: "2010-09-09"
-Description: CloudFormation template to create IAM users, assign permissions,
-    and configure event-driven automation.
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Lab Template for IAM Users, Groups, and EventBridge Rule
 
 Parameters:
-    EC2UserEmail:
-        Type: String
-        Description: Email address for my-ec2-user
-    S3UserEmail:
-        Type: String
-        Description: Email address for my-s3-user
-
+  EC2UserEmail:
+    Type: String
+    Description: Email address for ec2-user
+  S3UserEmail:
+    Type: String
+    Description: Email address for s3-user
 
 Resources:
-    ## 1️ Store Temporary Password in Secrets Manager
-    TemporaryPassword:
-        Type: AWS::SecretsManager::Secret
-        Properties:
-            Name: TempUserPassword
-            Description: Temporary password for all IAM users
-            GenerateSecretString:
-                PasswordLength: 12
-                ExcludeCharacters: '"@/\'
+  # Generate a one-time password and store it in Secrets Manager
+  OneTimePasswordSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: OneTimePassword
+      Description: Temporary password for IAM users
+      GenerateSecretString:
+        PasswordLength: 16
+        ExcludeCharacters: '"@/\'
 
-    ## 2️ IAM Group for S3 Read-Only Access
-    S3UserGroup:
-        Type: AWS::IAM::Group
-        Properties:
-            GroupName: MyS3UserGroup
-            Policies:
-                - PolicyName: S3ReadOnlyPolicy
-                  PolicyDocument:
-                      Version: "2012-10-17"
-                      Statement:
-                          - Effect: Allow
-                            Action:
-                                - s3:ListBucket
-                                - s3:GetObject
-                            Resource: "*"
+  # Create S3 User Group with read access to S3
+  S3UserGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: S3UserGroup
+      Policies:
+        - PolicyName: S3ReadAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:Get*
+                  - s3:List*
+                Resource: '*'
 
-    ## 3️ IAM Group for EC2 Read-Only Access
-    EC2UserGroup:
-        Type: AWS::IAM::Group
-        Properties:
-            GroupName: MyEC2UserGroup
-            Policies:
-                - PolicyName: EC2ReadOnlyPolicy
-                  PolicyDocument:
-                      Version: "2012-10-17"
-                      Statement:
-                          - Effect: Allow
-                            Action:
-                                - ec2:DescribeInstances
-                            Resource: "*"
+  # Create EC2 User Group with read access to EC2
+  EC2UserGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: EC2UserGroup
+      Policies:
+        - PolicyName: EC2ReadAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:Describe*
+                Resource: '*'
 
-    ## 4️ Create IAM Users
-    EC2User:
-        Type: AWS::IAM::User
-        Properties:
-            UserName: my-ec2-user
-            Groups:
-                - !Ref EC2UserGroup
-            LoginProfile:
-                Password: !Sub "{{resolve:secretsmanager:TempUserPassword}}"
-                PasswordResetRequired: true
+  # Create IAM Users
+  EC2User:
+    Type: AWS::IAM::User
+    DependsOn: UserCreationEventRule  # Ensure EventBridge rule is created first
+    Properties:
+      UserName: ec2-user
+      Groups:
+        - !Ref EC2UserGroup
+      LoginProfile:
+        Password: !Sub '{{resolve:secretsmanager:OneTimePassword}}'
+        PasswordResetRequired: true
 
-    S3User:
-        Type: AWS::IAM::User
-        Properties:
-            UserName: my-s3-user
-            Groups:
-                - !Ref S3UserGroup
-            LoginProfile:
-                Password: !Sub "{{resolve:secretsmanager:TempUserPassword}}"
-                PasswordResetRequired: true
+  S3User:
+    Type: AWS::IAM::User
+    DependsOn: UserCreationEventRule  # Ensure EventBridge rule is created first
+    Properties:
+      UserName: s3-user
+      Groups:
+        - !Ref S3UserGroup
+      LoginProfile:
+        Password: !Sub '{{resolve:secretsmanager:OneTimePassword}}'
+        PasswordResetRequired: true
 
-    ## 5️ Store User Emails in Parameter Store
-    EC2UserEmailParameter:
-        Type: AWS::SSM::Parameter
-        Properties:
-            Name: /user/emails/ec2-user
-            Type: String
-            Value: !Ref EC2UserEmail
+  # Store user emails in Parameter Store
+  EC2UserEmailParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /iam/users/ec2-user/email
+      Type: String
+      Value: !Ref EC2UserEmail
 
-    S3UserEmailParameter:
-        Type: AWS::SSM::Parameter
-        Properties:
-            Name: /user/emails/s3-user
-            Type: String
-            Value: !Ref S3UserEmail
+  S3UserEmailParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /iam/users/s3-user/email
+      Type: String
+      Value: !Ref S3UserEmail
 
-    ## 6️ EventBridge Rule to Detect IAM User Creation
-    UserCreationEventRule:
-        Type: AWS::Events::Rule
-        Properties:
-            Name: IAMUserCreationRule
-            Description: Triggers a Lambda function when a new IAM user is created
-            EventPattern:
-                source:
-                    - aws.iam
-                detail-type:
-                    - AWS API Call via CloudTrail
-                detail:
-                    eventSource:
-                        - iam.amazonaws.com
-                    eventName:
-                        - CreateUser
-            Targets:
-                - Arn: !GetAtt IAMUserLoggingLambda.Arn
-                  Id: IAMUserLoggingLambdaTarget
+  # EventBridge Rule to detect new user creation - UPDATED EVENT PATTERN
+  UserCreationEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern:
+        source:
+          - aws.iam
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - iam.amazonaws.com
+          eventName:
+            - CreateUser
+            - CreateLoginProfile
+      Targets:
+        - Id: LogUserDetailsLambda
+          Arn: !GetAtt LogUserDetailsLambda.Arn
 
-    ## 9️ Permission for EventBridge to Invoke Lambda
-    LambdaInvokePermission:
-        Type: AWS::Lambda::Permission
-        Properties:
-            FunctionName: !Ref IAMUserLoggingLambda
-            Action: lambda:InvokeFunction
-            Principal: events.amazonaws.com
-            SourceArn: !GetAtt UserCreationEventRule.Arn
+  # NEW: Permission for EventBridge to invoke Lambda
+  UserCreationLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LogUserDetailsLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt UserCreationEventRule.Arn
 
-    ## 7️ Lambda Function to Log Email & Password
-    IAMUserLoggingLambda:
-        Type: AWS::Lambda::Function
-        Properties:
-            FunctionName: NewIAMUserLogger
-            Handler: index.handler
-            Runtime: python3.9
-            Role: !GetAtt IAMUserLoggingLambdaRole.Arn
-            Code:
-                ZipFile: |
-                    import json
-                    import boto3
-                    import os
-                    import logging
+  # Lambda Function to log user details - UPDATED CODE
+  LogUserDetailsLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          import logging
 
-                    logger = logging.getLogger()
-                    logger.setLevel(logging.INFO)
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
 
-                    def handler(event, context):
-                        try:
-                            ssm = boto3.client('ssm')
+          def handler(event, context):
+              try:
+                  ssm = boto3.client('ssm')
 
-                            # Extract user details safely
-                            detail = event.get('detail', {})
-                            request_parameters = detail.get('requestParameters', {})
-                            user_name = request_parameters.get('userName', 'unknown')
+                  # Extract user details safely
+                  detail = event.get('detail', {})
+                  request_parameters = detail.get('requestParameters', {})
+                  user_name = request_parameters.get('userName', 'unknown')
 
-                            logger.info(detail)
+                  logger.info(f"User creation detected: {user_name}")
 
-                            # Try to get the email if the parameter exists
-                            try:
-                                email_param = ssm.get_parameter(Name=f'/iam/users/{user_name}/email')
-                                email = email_param['Parameter']['Value']
-                                logger.info(f"Found email for user {user_name}: {email}")
-                            except ssm.exceptions.ParameterNotFound:
-                                logger.warning(f"No email parameter found for user: {user_name}")
-                                email = "Not found in SSM"
+                  # Try to get the email if the parameter exists
+                  try:
+                      email_param = ssm.get_parameter(Name=f'/iam/users/{user_name}/email')
+                      email = email_param['Parameter']['Value']
+                      logger.info(f"Found email for user {user_name}: {email}")
+                  except ssm.exceptions.ParameterNotFound:
+                      logger.warning(f"No email parameter found for user: {user_name}")
+                      email = "Not found in SSM"
 
-                            return {
-                                'statusCode': 200,
-                                'body': json.dumps(f"Processed user creation event for: {user_name}")
-                            }
-                        except Exception as e:
-                            logger.error(f"Error processing event: {str(e)}")
-                            logger.error(f"Event: {json.dumps(event)}")
-                            raise
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps(f"Processed user creation event for: {user_name}")
+                  }
+              except Exception as e:
+                  logger.error(f"Error processing event: {str(e)}")
+                  logger.error(f"Event: {json.dumps(event)}")
+                  raise
 
-    ## 8️ IAM Role for Lambda Execution
-    IAMUserLoggingLambdaRole:
-        Type: AWS::IAM::Role
-        Properties:
-            AssumeRolePolicyDocument:
-                Version: "2012-10-17"
-                Statement:
-                    - Effect: Allow
-                      Principal:
-                          Service: lambda.amazonaws.com
-                      Action: sts:AssumeRole
-            ManagedPolicyArns:
-                - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-            Policies:
-                - PolicyName: LambdaPermissions
-                  PolicyDocument:
-                      Version: "2012-10-17"
-                      Statement:
-                          - Effect: Allow
-                            Action:
-                                - ssm:GetParameter
-                            Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/iam/users/*
+      Runtime: python3.9
+      Timeout: 10
+
+  # IAM Role for Lambda Execution - UPDATED WITH MORE SPECIFIC PERMISSIONS
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: LambdaPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/iam/users/*'
 
 Outputs:
-    IAMUserLoggingLambdaARN:
-        Description: ARN of the Lambda function that logs IAM user credentials
-        Value: !GetAtt IAMUserLoggingLambda.Arn
+  OneTimePasswordSecretArn:
+    Description: ARN of the One-Time Password Secret
+    Value: !Ref OneTimePasswordSecret
+  EC2UserEmailParameterName:
+    Description: Name of the EC2 User Email Parameter
+    Value: !Ref EC2UserEmailParameter
+  S3UserEmailParameterName:
+    Description: Name of the S3 User Email Parameter
+    Value: !Ref S3UserEmailParameter
+  LambdaFunctionName:
+    Description: Name of the User Details Logging Lambda Function
+    Value: !Ref LogUserDetailsLambda
+  EventBridgeRuleName:
+    Description: Name of the EventBridge Rule for User Creation
+    Value: !Ref UserCreationEventRule
